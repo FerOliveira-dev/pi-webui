@@ -14,6 +14,12 @@ const statusRight = document.getElementById("status-right");
 const statusCwd = document.getElementById("status-cwd");
 const statusError = document.getElementById("status-error");
 
+// Global loading bar (inside composer-wrapper, top)
+const globalLoading = document.createElement("div");
+globalLoading.className = "global-loading";
+const composerWrapper = document.querySelector(".composer-wrapper");
+composerWrapper.insertBefore(globalLoading, composerWrapper.firstChild);
+
 import {
   createChatState,
   submitUser as csSubmitUser,
@@ -21,6 +27,7 @@ import {
   resetHistory as csResetHistory,
   setError as csSetError,
   selectItems as csSelectItems,
+  TYPING_MIN_MS,
 } from "./chat-state.mjs";
 import { dispatchSessionEvent } from "./session-dispatch.mjs";
 import { createModalController } from "./modal-controller.mjs";
@@ -46,6 +53,7 @@ let slashCommands = [];
 let homeDir = "";
 let slashFiltered = [];
 let slashIndex = 0;
+let skipSlashUpdate = false;
 // Cursor into the server's session-event log. The server tags each
 // session_event with a seq; we send our latest one back on (re)connect via
 // `ready` so the server can replay missed events without a full reset.
@@ -228,7 +236,7 @@ function renderThinkingBlockHtml(text) {
 
 function renderToolCallBlockHtml(name, input) {
   const json = JSON.stringify(prettifyHomePathsDeep(input ?? {}), null, 2);
-  return `<details class="tool-block" open><summary class="tool-label">${escapeHtml(name)}</summary><pre><code class="language-json">${escapeHtml(json)}</code></pre></details>`;
+  return `<details class="tool-block"><summary class="tool-label">${escapeHtml(name)}</summary><pre><code class="language-json">${escapeHtml(json)}</code></pre></details>`;
 }
 
 function formatDiffHtml(diff) {
@@ -318,7 +326,7 @@ function renderToolResultBlockHtml(name, result) {
     ? ` data-diff="${diff.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"`
     : "";
   const body = `<pre${dataAttrs}${dataTextAttr}${dataDiffAttr}>${toggleBtns}<button type="button" class="copy-btn" title="Copy">copy</button>${contentHtml}</pre>`;
-  return `<details class="tool-result-block" open><summary class="tool-result-label">${escapeHtml(name)}</summary>${body}</details>`;
+  return `<details class="tool-result-block"><summary class="tool-result-label">${escapeHtml(name)}</summary>${body}</details>`;
 }
 
 function renderBlocksHtml(blocks) {
@@ -464,6 +472,7 @@ function buildTypingElement() {
 const extraEls = new WeakMap(); // chat-state extra item -> { el, blocks }
 let canonicalEls = [];          // index-aligned [{ el, message }, ...]
 let typingEl = null;
+let typingTimer = null;         // setTimeout handle for min typing display
 
 function reconcileChildren(parent, desired) {
   // Walk desired list; ensure each element sits at the matching index.
@@ -535,9 +544,26 @@ function renderLog() {
         }
         cached.wasLive = isLive;
       }
-    } else { // typing
-      if (!typingEl) typingEl = buildTypingElement();
-      el = typingEl;
+      // Injetar typing indicator ao lado do título se:
+      // - Tool result pendente (result: null) → loading na tool específica
+      // - isRunning=true → loading na liveAssistant (apenas enquanto rodando)
+      const title = el.querySelector("h3");
+      if (title) {
+        const hasPendingTool = item.blocks && item.blocks.some(b => b.type === "tool_result" && (b.result === null || b.result === undefined));
+        const shouldShowTyping = hasPendingTool || (isLive && chatState.isRunning);
+
+        if (shouldShowTyping) {
+          if (!title.querySelector(".thinking-indicator")) {
+            const typingIndicator = document.createElement("span");
+            typingIndicator.className = "thinking-indicator";
+            typingIndicator.innerHTML = "<span class=\"dot\"></span><span class=\"dot\"></span><span class=\"dot\"></span>";
+            title.appendChild(typingIndicator);
+          }
+        } else {
+          const indicator = title.querySelector(".thinking-indicator");
+          if (indicator) indicator.remove();
+        }
+      }
     }
     desired.push(el);
   }
@@ -546,6 +572,20 @@ function renderLog() {
   reconcileChildren(log, desired);
   syncRunningButton();
   scrollLogToBottom();
+
+  // Remover typing indicator de TODOS os elementos se não houver nada processando
+  if (!chatState.isRunning && chatState.pendingToolResults.size === 0) {
+    for (const indicator of log.querySelectorAll(".thinking-indicator")) {
+      indicator.remove();
+    }
+  }
+
+  // Global loading bar: visível enquanto isRunning ou há tools pendentes
+  if (chatState.isRunning || chatState.pendingToolResults.size > 0) {
+    globalLoading.classList.add("active");
+  } else {
+    globalLoading.classList.remove("active");
+  }
 }
 
 function handleSessionEvent(event) {
@@ -1527,7 +1567,11 @@ function renderSlashMenu() {
     const el = document.createElement("div");
     el.className = `slash-item${i === slashIndex ? " active" : ""}${cmd.supported === false ? " unsupported" : ""}`;
     el.dataset.index = String(i);
-    el.innerHTML = `<span class="name">/${escapeHtml(cmd.name)}</span><span class="desc">${escapeHtml(cmd.description || "")}</span>`;
+    el.dataset.source = cmd.source || "";
+    const badge = cmd.source && cmd.source !== "builtin" && cmd.source !== "webui"
+      ? `<span class="badge">${escapeHtml(cmd.source)}</span>`
+      : "";
+    el.innerHTML = `<span class="name">/${escapeHtml(cmd.name)}${badge}</span><span class="desc">${escapeHtml(cmd.description || "")}</span>`;
     el.addEventListener("mousedown", (event) => {
       event.preventDefault();
       slashIndex = i;
@@ -1541,6 +1585,10 @@ function renderSlashMenu() {
 }
 
 function updateSlashMenu() {
+  if (skipSlashUpdate) {
+    skipSlashUpdate = false;
+    return;
+  }
   const parsed = parseSlash(input.value);
   if (!parsed || parsed.arg) {
     slashFiltered = [];
@@ -1564,6 +1612,7 @@ function hideSlashMenuForHistory() {
 function applySlashSelection() {
   const cmd = slashFiltered[slashIndex];
   if (!cmd) return;
+  skipSlashUpdate = true;
   input.value = `/${cmd.name} `;
   slashFiltered = [];
   slashMenu.hidden = true;
@@ -1607,11 +1656,17 @@ input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       const cmd = slashFiltered[slashIndex];
-      if (cmd) {
+      if (cmd && cmd.source === "skill") {
+        // Skill: Enter = selecionar (igual Tab)
+        applySlashSelection();
+      } else {
+        // Builtin/webui: Enter = selecionar + enviar (comportamento original)
+        skipSlashUpdate = true;
         input.value = `/${cmd.name}`;
+        slashFiltered = [];
+        slashMenu.hidden = true;
+        composer.requestSubmit();
       }
-      slashMenu.hidden = true;
-      composer.requestSubmit();
       return;
     }
   }
@@ -1919,10 +1974,8 @@ composer.addEventListener("submit", (event) => {
       send({ type: "bash", command: route.command });
       return;
     }
-
-    const slash = parseSlash(message);
-    if (slash) {
-      if (slash.name === "name" && !slash.arg.trim()) {
+    if (route.kind === "slash") {
+      if (route.name === "name" && !route.arg.trim()) {
         const current = currentSessionState?.sessionName || "";
         showPromptModal("Session name", current, (value) => {
           logger.info("slash sent", { name: "name" });
@@ -1930,8 +1983,18 @@ composer.addEventListener("submit", (event) => {
         });
         return;
       }
-      logger.info("slash sent", { name: slash.name, hasArg: slash.arg.length > 0 });
-      send({ type: "slash_command", name: slash.name, arg: slash.arg });
+      logger.info("slash sent", { name: route.name, hasArg: route.arg.length > 0 });
+      // Skills: show optimistic message (gets replaced by server replay)
+      const skillCmd = slashCommands.find(
+        (c) => c.name === route.name && c.source === "skill"
+      );
+      if (skillCmd) {
+        const displayMsg = route.arg
+          ? `/${route.name} ${route.arg}`
+          : `/${route.name}`;
+        appendOptimisticUserMessage(displayMsg, []);
+      }
+      send({ type: "slash_command", name: route.name, arg: route.arg });
       return;
     }
   }
