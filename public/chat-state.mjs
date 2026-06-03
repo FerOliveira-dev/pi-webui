@@ -90,7 +90,10 @@ export function setHistory(state, messages) {
       }
     }
   }
-  if (!state.isRunning) state.showTyping = false;
+  // Só esconde o loading se o agente não estiver rodando E não houver tools pendentes
+  if (!state.isRunning && state.pendingToolResults.size === 0) {
+    state.showTyping = false;
+  }
 }
 
 function lastUserMessage(canonical) {
@@ -142,7 +145,8 @@ function lastUserText(canonical) {
 
 export function applyDelta(state, delta) {
   if (delta.type === "text_delta" || delta.type === "thinking_delta") {
-    disableTyping(state);
+    // REMOVIDO: disableTyping(state);
+    // O loading deve permanecer visível durante todo o streaming, não sumir no primeiro delta
     const live = ensureLiveAssistant(state);
     const kind = delta.type === "thinking_delta" ? "thinking" : "text";
     const idx = delta.contentIndex;
@@ -161,7 +165,8 @@ export function applyDelta(state, delta) {
     // arguments) as soon as the model decides them, not after pi runs it.
     const tc = delta.toolCall;
     if (!tc) return;
-    disableTyping(state);
+    // REMOVIDO: disableTyping(state);
+    // O loading deve permanecer visível durante todo o processo
     const live = ensureLiveAssistant(state);
     live.blocks.push({ type: "tool_call", id: tc.id, name: tc.name, input: tc.arguments });
     // Following text/thinking is a fresh block, even if contentIndex is reused.
@@ -177,7 +182,8 @@ export function onToolStart(state, name, input, id) {
   // is its own top-level entry — that mirrors the canonical SDK shape after
   // reload (an assistant message containing tool_use, then a separate
   // toolResult message).
-  disableTyping(state);
+  // REMOVIDO: disableTyping(state);
+  // O loading deve permanecer visível durante a execução de ferramentas
   // Dedup: if the LLM-side toolcall_end already added this tool_call to ANY
   // assistant entry in streamExtras (matched by SDK toolCallId), skip the
   // tool_call push entirely — and don't create a phantom empty assistant
@@ -251,7 +257,10 @@ export function onToolEnd(state, name, result, id) {
   // below the tool result, matching canonical layout.
   state.liveAssistant = null;
   state.liveTextBlocks = null;
-  if (state.isRunning) enableTyping(state);
+  // Mantém o loading ativo enquanto o agente estiver rodando
+  if (state.isRunning) {
+    state.showTyping = true;
+  }
 }
 
 export function onAgentStart(state) {
@@ -261,9 +270,14 @@ export function onAgentStart(state) {
 }
 
 export function onAgentEnd(state) {
-  state.isRunning = false;
-  state.showTyping = false;
   state.typingSince = 0;
+  // Mantém isRunning=true se ainda há tools pendentes (evita gap no loading)
+  if (state.pendingToolResults.size > 0) {
+    state.isRunning = true;
+  } else {
+    state.isRunning = false;
+    state.showTyping = false;
+  }
   // Clear the streaming pointers but KEEP pendingToolResults — the LLM turn
   // ended, but pi runs tools AFTER the assistant message is done. A
   // tool_execution_end may still arrive and needs to find its placeholder.
@@ -296,7 +310,7 @@ export function selectItems(state) {
   }
   if (state.pendingUser) items.push({ source: "extra", item: state.pendingUser });
   for (const e of state.streamExtras) items.push({ source: "extra", item: e });
-  if (state.showTyping) items.push({ source: "typing" });
+  // REMOVIDO: typing indicator como item separado - agora é injetado na liveAssistant
   return items;
 }
 

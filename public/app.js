@@ -14,6 +14,12 @@ const statusRight = document.getElementById("status-right");
 const statusCwd = document.getElementById("status-cwd");
 const statusError = document.getElementById("status-error");
 
+// Global loading bar (inside composer-wrapper, top)
+const globalLoading = document.createElement("div");
+globalLoading.className = "global-loading";
+const composerWrapper = document.querySelector(".composer-wrapper");
+composerWrapper.insertBefore(globalLoading, composerWrapper.firstChild);
+
 import {
   createChatState,
   submitUser as csSubmitUser,
@@ -538,9 +544,26 @@ function renderLog() {
         }
         cached.wasLive = isLive;
       }
-    } else { // typing
-      if (!typingEl) typingEl = buildTypingElement();
-      el = typingEl;
+      // Injetar typing indicator ao lado do título se:
+      // - Tool result pendente (result: null) → loading na tool específica
+      // - isRunning=true → loading na liveAssistant (apenas enquanto rodando)
+      const title = el.querySelector("h3");
+      if (title) {
+        const hasPendingTool = item.blocks && item.blocks.some(b => b.type === "tool_result" && (b.result === null || b.result === undefined));
+        const shouldShowTyping = hasPendingTool || (isLive && chatState.isRunning);
+
+        if (shouldShowTyping) {
+          if (!title.querySelector(".thinking-indicator")) {
+            const typingIndicator = document.createElement("span");
+            typingIndicator.className = "thinking-indicator";
+            typingIndicator.innerHTML = "<span class=\"dot\"></span><span class=\"dot\"></span><span class=\"dot\"></span>";
+            title.appendChild(typingIndicator);
+          }
+        } else {
+          const indicator = title.querySelector(".thinking-indicator");
+          if (indicator) indicator.remove();
+        }
+      }
     }
     desired.push(el);
   }
@@ -550,23 +573,18 @@ function renderLog() {
   syncRunningButton();
   scrollLogToBottom();
 
-  // Schedule re-render after minimum typing display time expires.
-  // This ensures the typing indicator is visible for at least TYPING_MIN_MS
-  // even if the first delta arrives milliseconds after agent_start.
-  if (chatState.showTyping && chatState.typingSince > 0) {
-    const elapsed = Date.now() - chatState.typingSince;
-    const remaining = Math.max(0, TYPING_MIN_MS - elapsed);
-    if (typingTimer) clearTimeout(typingTimer);
-    if (remaining > 0) {
-      typingTimer = setTimeout(() => {
-        typingTimer = null;
-        chatState.showTyping = false;
-        renderLog();
-      }, remaining);
+  // Remover typing indicator de TODOS os elementos se não houver nada processando
+  if (!chatState.isRunning && chatState.pendingToolResults.size === 0) {
+    for (const indicator of log.querySelectorAll(".thinking-indicator")) {
+      indicator.remove();
     }
-  } else if (typingTimer) {
-    clearTimeout(typingTimer);
-    typingTimer = null;
+  }
+
+  // Global loading bar: visível enquanto isRunning ou há tools pendentes
+  if (chatState.isRunning || chatState.pendingToolResults.size > 0) {
+    globalLoading.classList.add("active");
+  } else {
+    globalLoading.classList.remove("active");
   }
 }
 

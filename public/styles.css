@@ -548,6 +548,35 @@ body.drag-active .composer-wrapper {
   margin: 0.6rem 0;
 }
 
+/* ── Global loading bar (server processing) ────── */
+
+.global-loading {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: global-loading-slide 1.5s infinite linear;
+  z-index: 1000;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.global-loading.active {
+  opacity: 1;
+}
+
+.composer-wrapper {
+  position: relative;
+}
+
+@keyframes global-loading-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
 /* ── Thinking indicator (server processing) ────── */
 
 .thinking-indicator {
@@ -556,6 +585,7 @@ body.drag-active .composer-wrapper {
   align-items: center;
   vertical-align: middle;
   padding: 0.25rem 0;
+  margin-left: 0.5rem;
 }
 
 .thinking-indicator .dot {
