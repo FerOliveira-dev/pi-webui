@@ -21,6 +21,7 @@ import {
   resetHistory as csResetHistory,
   setError as csSetError,
   selectItems as csSelectItems,
+  TYPING_MIN_MS,
 } from "./chat-state.mjs";
 import { dispatchSessionEvent } from "./session-dispatch.mjs";
 import { createModalController } from "./modal-controller.mjs";
@@ -464,6 +465,7 @@ function buildTypingElement() {
 const extraEls = new WeakMap(); // chat-state extra item -> { el, blocks }
 let canonicalEls = [];          // index-aligned [{ el, message }, ...]
 let typingEl = null;
+let typingTimer = null;         // setTimeout handle for min typing display
 
 function reconcileChildren(parent, desired) {
   // Walk desired list; ensure each element sits at the matching index.
@@ -546,6 +548,25 @@ function renderLog() {
   reconcileChildren(log, desired);
   syncRunningButton();
   scrollLogToBottom();
+
+  // Schedule re-render after minimum typing display time expires.
+  // This ensures the typing indicator is visible for at least TYPING_MIN_MS
+  // even if the first delta arrives milliseconds after agent_start.
+  if (chatState.showTyping && chatState.typingSince > 0) {
+    const elapsed = Date.now() - chatState.typingSince;
+    const remaining = Math.max(0, TYPING_MIN_MS - elapsed);
+    if (typingTimer) clearTimeout(typingTimer);
+    if (remaining > 0) {
+      typingTimer = setTimeout(() => {
+        typingTimer = null;
+        chatState.showTyping = false;
+        renderLog();
+      }, remaining);
+    }
+  } else if (typingTimer) {
+    clearTimeout(typingTimer);
+    typingTimer = null;
+  }
 }
 
 function handleSessionEvent(event) {

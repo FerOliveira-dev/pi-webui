@@ -14,7 +14,15 @@ import {
   clearError,
   selectItems,
   userMessageText,
+  TYPING_MIN_MS,
 } from "../public/chat-state.mjs";
+
+// Mock Date.now() for time-sensitive tests. Returns a function to restore.
+function mockDateNow(fakeNow) {
+  const realNow = Date.now;
+  Date.now = () => fakeNow;
+  return () => { Date.now = realNow; };
+}
 
 // Returns the text of the first text block in an item, if any.
 function itemText(item) {
@@ -102,8 +110,90 @@ test("typing indicator clears once first delta arrives", () => {
   const s = createChatState();
   submitUser(s, "hi");
   applyDelta(s, { type: "text_delta", contentIndex: 0, delta: "Hello" });
+  // With minimum typing time, the indicator stays visible until TYPING_MIN_MS
+  // has elapsed. Since these events happen instantly, it should still be visible.
   const items = selectItems(s);
-  assert.ok(!items.some((it) => it.source === "typing"), "typing should clear after first delta");
+  assert.ok(items.some((it) => it.source === "typing"), "typing stays visible during minimum time");
+  assert.ok(s.liveAssistant, "live assistant should exist after delta");
+});
+
+test("typing indicator appears on agent_start (multi-turn gap fix)", () => {
+  const s = createChatState();
+  submitUser(s, "hi");
+  onAgentStart(s);
+  setHistory(s, [userMsg("hi")]);
+  applyDelta(s, { type: "text_delta", contentIndex: 0, delta: "OK" });
+  onAgentEnd(s);
+  // Agent turn 1 finished; showTyping should be false
+  assert.equal(s.showTyping, false, "typing cleared after agent_end");
+  // Simulate a new agent turn (e.g. after tool execution)
+  onAgentStart(s);
+  assert.equal(s.showTyping, true, "typing must appear immediately on agent_start");
+  assert.equal(s.isRunning, true, "isRunning must be true");
+  const items = selectItems(s);
+  assert.ok(hasTyping(items), "typing indicator must be visible before first delta");
+  // First delta: typing stays visible (minimum time not elapsed yet)
+  applyDelta(s, { type: "text_delta", contentIndex: 0, delta: "New turn text" });
+  assert.ok(hasTyping(selectItems(s)), "typing stays visible during minimum time after delta");
+});
+
+test("typing indicator disappears after minimum time expires", () => {
+  const restore = mockDateNow(1000);
+  const s = createChatState();
+  submitUser(s, "hi");
+  // typingSince = 1000
+  assert.equal(s.typingSince, 1000, "typingSince set on submit");
+  // Typing visible at start
+  assert.ok(hasTyping(selectItems(s)), "typing visible at t=1000");
+  // First delta arrives instantly — showTyping stays true (minimum time)
+  applyDelta(s, { type: "text_delta", contentIndex: 0, delta: "Hello" });
+  assert.equal(s.showTyping, true, "showTyping stays true before min time");
+  assert.ok(hasTyping(selectItems(s)), "typing still visible (min not elapsed)");
+  // Fast-forward past the minimum threshold
+  restore();
+  mockDateNow(1000 + TYPING_MIN_MS + 10);
+  // Next delta after minimum — showTyping finally clears
+  applyDelta(s, { type: "text_delta", contentIndex: 1, delta: " more" });
+  assert.equal(s.showTyping, false, "showTyping cleared after min time");
+  assert.ok(!hasTyping(selectItems(s)), "typing gone after min time");
+  Date.now = restore;
+});
+
+test("typing indicator visible during multi-turn gap", () => {
+  const restore = mockDateNow(1000);
+  const s = createChatState();
+  submitUser(s, "hi");
+  onAgentStart(s);
+  setHistory(s, [userMsg("hi")]);
+  applyDelta(s, { type: "text_delta", contentIndex: 0, delta: "OK" });
+  onAgentEnd(s);
+  // Turn 1 done — typing cleared
+  assert.equal(s.showTyping, false, "showTyping false after agent_end");
+  assert.equal(s.typingSince, 0, "typingSince cleared after agent_end");
+  // Turn 2 starts
+  mockDateNow(2000);
+  onAgentStart(s);
+  assert.equal(s.typingSince, 2000, "typingSince reset on new agent_start");
+  assert.ok(hasTyping(selectItems(s)), "typing visible for turn 2");
+  restore();
+  Date.now = restore;
+});
+
+test("disableTyping keeps showTyping true until minimum elapsed", () => {
+  const restore = mockDateNow(1000);
+  const s = createChatState();
+  submitUser(s, "hi");
+  assert.equal(s.showTyping, true);
+  // Delta arrives before minimum — showTyping stays true
+  applyDelta(s, { type: "text_delta", contentIndex: 0, delta: "Hi" });
+  assert.equal(s.showTyping, true, "showTyping stays true before minimum");
+  // Advance past minimum
+  restore();
+  mockDateNow(1000 + TYPING_MIN_MS);
+  // Next delta after minimum — showTyping finally clears
+  applyDelta(s, { type: "text_delta", contentIndex: 1, delta: " more" });
+  assert.equal(s.showTyping, false, "showTyping cleared after minimum");
+  Date.now = restore;
 });
 
 test("strict ordering: user, then assistant streaming below", () => {
