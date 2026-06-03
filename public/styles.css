@@ -357,6 +357,36 @@ body.drag-active .composer-wrapper {
   white-space: nowrap;
 }
 
+.slash-item .badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 3px;
+  margin-left: 6px;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+}
+
+.slash-item[data-source="skill"] .badge {
+  background: var(--accent);
+  color: var(--bg);
+}
+
+.slash-item[data-source="template"] .badge {
+  background: var(--tool);
+  color: var(--bg);
+}
+
+.slash-item[data-source="extension"] .badge {
+  background: var(--success);
+  color: var(--bg);
+}
+
+.slash-item.active .badge {
+  background: var(--bg);
+  color: var(--accent);
+}
+
 /* ── Log / messages ─────────────────────────────── */
 
 .log {

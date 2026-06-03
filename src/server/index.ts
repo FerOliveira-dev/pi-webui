@@ -38,6 +38,7 @@ import {
 import { createEventLog } from "./event-log.js";
 import { log as logger } from "./log.js";
 import { createExtUiBridge } from "./ext-ui.js";
+import { discoverSkills } from "./skills.js";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 4096;
@@ -624,6 +625,8 @@ class NativePiSessionController {
       send: (msg) => sendJson(this.ws, msg),
       log: logger,
     });
+    // Map of skill name → SKILL.md path for slash command dispatch.
+    this.skills = new Map();
     this.ready = this.init().catch((error) => {
       const message = error instanceof Error ? error.message : String(error);
       sendJson(this.ws, { type: "server_error", payload: message });
@@ -639,6 +642,9 @@ class NativePiSessionController {
     });
 
     await this.bindSession();
+
+    // Discover skills from project-local, agent, and extension directories.
+    this.discoverSkills();
 
     sendJson(this.ws, {
       type: "connected",
@@ -671,6 +677,7 @@ class NativePiSessionController {
       sessionManager: SessionManager.create(newCwd, sessionDir),
     });
     await this.bindSession();
+    this.discoverSkills();
     await this.sendBootstrap();
   }
 
@@ -900,6 +907,19 @@ class NativePiSessionController {
     });
   }
 
+  // Discover skills from project-local, agent, and extension directories.
+  // Stores a deduplicated Map of name → { name, description, path } in this.skills.
+  discoverSkills() {
+    this.skills.clear();
+    const discovered = discoverSkills(agentDir, this.cwd);
+    for (const skill of discovered) {
+      // Keep first occurrence per name (project > agent > extension priority).
+      if (!this.skills.has(skill.name)) {
+        this.skills.set(skill.name, skill);
+      }
+    }
+  }
+
   collectSlashCommands() {
     const commands = BUILTIN_SLASH_COMMANDS.map((c) => ({
       name: c.name,
@@ -941,6 +961,18 @@ class NativePiSessionController {
           supported: true,
         });
       }
+    }
+
+    // Inject skills as slash commands — skip names already registered.
+    const registeredNames = new Set(commands.map((c) => c.name));
+    for (const skill of this.skills.values()) {
+      if (registeredNames.has(skill.name)) continue;
+      commands.push({
+        name: skill.name,
+        description: skill.description,
+        source: "skill",
+        supported: true,
+      });
     }
 
     return commands;
@@ -1154,6 +1186,36 @@ class NativePiSessionController {
         const handler = SLASH_HANDLERS[name];
         if (handler) {
           await this.runCommand(`slash:${name}`, () => handler(this, arg));
+          return;
+        }
+        // Check if the command is a registered skill — inject SKILL.md
+        // as a tool_result message so the agent has context without polluting
+        // the user message. The chat shows a collapsible "Tool result: read".
+        const skillInfo = this.skills.get(name);
+        if (skillInfo) {
+          await this.runCommand(`slash:${name}`, async () => {
+            const content = readFileSync(skillInfo.path, "utf8");
+            // Strip frontmatter for the skill body.
+            const body = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "").trim();
+            const visibleText = arg
+              ? `/${name} ${arg}`
+              : `/${name}`;
+            // Inject skill content as a synthetic tool_result in agent state.
+            // This gives the agent the skill instructions without polluting
+            // the user message that appears in the chat.
+            const skillToolResult = {
+              role: "toolResult",
+              toolName: "read",
+              content: [{ type: "text", text: body }],
+              details: { path: skillInfo.path },
+            };
+            this.session.agent.state.messages.push(skillToolResult);
+            // Prompt with only the visible user text — clean chat message.
+            await this.session.prompt(visibleText);
+            await this.sendState();
+            await this.sendMessages();
+            return { dispatched: true, skill: name };
+          });
           return;
         }
         // Fall through to extension/template dispatch via session.prompt — it

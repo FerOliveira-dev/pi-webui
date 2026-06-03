@@ -46,6 +46,7 @@ let slashCommands = [];
 let homeDir = "";
 let slashFiltered = [];
 let slashIndex = 0;
+let skipSlashUpdate = false;
 // Cursor into the server's session-event log. The server tags each
 // session_event with a seq; we send our latest one back on (re)connect via
 // `ready` so the server can replay missed events without a full reset.
@@ -228,7 +229,7 @@ function renderThinkingBlockHtml(text) {
 
 function renderToolCallBlockHtml(name, input) {
   const json = JSON.stringify(prettifyHomePathsDeep(input ?? {}), null, 2);
-  return `<details class="tool-block" open><summary class="tool-label">${escapeHtml(name)}</summary><pre><code class="language-json">${escapeHtml(json)}</code></pre></details>`;
+  return `<details class="tool-block"><summary class="tool-label">${escapeHtml(name)}</summary><pre><code class="language-json">${escapeHtml(json)}</code></pre></details>`;
 }
 
 function formatDiffHtml(diff) {
@@ -318,7 +319,7 @@ function renderToolResultBlockHtml(name, result) {
     ? ` data-diff="${diff.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"`
     : "";
   const body = `<pre${dataAttrs}${dataTextAttr}${dataDiffAttr}>${toggleBtns}<button type="button" class="copy-btn" title="Copy">copy</button>${contentHtml}</pre>`;
-  return `<details class="tool-result-block" open><summary class="tool-result-label">${escapeHtml(name)}</summary>${body}</details>`;
+  return `<details class="tool-result-block"><summary class="tool-result-label">${escapeHtml(name)}</summary>${body}</details>`;
 }
 
 function renderBlocksHtml(blocks) {
@@ -1527,7 +1528,11 @@ function renderSlashMenu() {
     const el = document.createElement("div");
     el.className = `slash-item${i === slashIndex ? " active" : ""}${cmd.supported === false ? " unsupported" : ""}`;
     el.dataset.index = String(i);
-    el.innerHTML = `<span class="name">/${escapeHtml(cmd.name)}</span><span class="desc">${escapeHtml(cmd.description || "")}</span>`;
+    el.dataset.source = cmd.source || "";
+    const badge = cmd.source && cmd.source !== "builtin" && cmd.source !== "webui"
+      ? `<span class="badge">${escapeHtml(cmd.source)}</span>`
+      : "";
+    el.innerHTML = `<span class="name">/${escapeHtml(cmd.name)}${badge}</span><span class="desc">${escapeHtml(cmd.description || "")}</span>`;
     el.addEventListener("mousedown", (event) => {
       event.preventDefault();
       slashIndex = i;
@@ -1541,6 +1546,10 @@ function renderSlashMenu() {
 }
 
 function updateSlashMenu() {
+  if (skipSlashUpdate) {
+    skipSlashUpdate = false;
+    return;
+  }
   const parsed = parseSlash(input.value);
   if (!parsed || parsed.arg) {
     slashFiltered = [];
@@ -1564,6 +1573,7 @@ function hideSlashMenuForHistory() {
 function applySlashSelection() {
   const cmd = slashFiltered[slashIndex];
   if (!cmd) return;
+  skipSlashUpdate = true;
   input.value = `/${cmd.name} `;
   slashFiltered = [];
   slashMenu.hidden = true;
@@ -1607,11 +1617,17 @@ input.addEventListener("keydown", (event) => {
     if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       const cmd = slashFiltered[slashIndex];
-      if (cmd) {
+      if (cmd && cmd.source === "skill") {
+        // Skill: Enter = selecionar (igual Tab)
+        applySlashSelection();
+      } else {
+        // Builtin/webui: Enter = selecionar + enviar (comportamento original)
+        skipSlashUpdate = true;
         input.value = `/${cmd.name}`;
+        slashFiltered = [];
+        slashMenu.hidden = true;
+        composer.requestSubmit();
       }
-      slashMenu.hidden = true;
-      composer.requestSubmit();
       return;
     }
   }
@@ -1919,10 +1935,8 @@ composer.addEventListener("submit", (event) => {
       send({ type: "bash", command: route.command });
       return;
     }
-
-    const slash = parseSlash(message);
-    if (slash) {
-      if (slash.name === "name" && !slash.arg.trim()) {
+    if (route.kind === "slash") {
+      if (route.name === "name" && !route.arg.trim()) {
         const current = currentSessionState?.sessionName || "";
         showPromptModal("Session name", current, (value) => {
           logger.info("slash sent", { name: "name" });
@@ -1930,8 +1944,18 @@ composer.addEventListener("submit", (event) => {
         });
         return;
       }
-      logger.info("slash sent", { name: slash.name, hasArg: slash.arg.length > 0 });
-      send({ type: "slash_command", name: slash.name, arg: slash.arg });
+      logger.info("slash sent", { name: route.name, hasArg: route.arg.length > 0 });
+      // Skills: show optimistic message (gets replaced by server replay)
+      const skillCmd = slashCommands.find(
+        (c) => c.name === route.name && c.source === "skill"
+      );
+      if (skillCmd) {
+        const displayMsg = route.arg
+          ? `/${route.name} ${route.arg}`
+          : `/${route.name}`;
+        appendOptimisticUserMessage(displayMsg, []);
+      }
+      send({ type: "slash_command", name: route.name, arg: route.arg });
       return;
     }
   }
